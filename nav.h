@@ -1,75 +1,84 @@
 #pragma once
 
 // arduino
-#include <Servo.h>
 #include <NewPing.h>
+#include <Servo.h>
 #include <PID_v1.h>
 #include <PID_AutoTune_v0.h>
 #include <StandardCplusplus.h>
-#include <system_configuration.h>
-#include <unwind-cxx.h>
-#include <utility.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_LSM303_U.h>
+#include <Adafruit_L3GD20_U.h>
+#include <Adafruit_9DOF.h>
+#include <Adafruit_BLE.h>
+#include <Adafruit_BluefruitLE_SPI.h>
+#include <Adafruit_BluefruitLE_UART.h>
 
-// stl
-#include <algorithm>
-#include <functional>
-#include <sstream>
-#include <string>
-#include <vector>
+enum Face {fl, fr, fc, rl, rr};
 
-// note: all distances are in cm
-
-enum face { fl, fr, fc, rl, rr, rc };
-
-struct usonic {
-    usonic(int trigger, int echo) :
-        sensor(trigger, echo),
-        trigger(trigger),
-        echo(echo),
-        input(0)
+struct control_var {
+    control_var(double input, double setpoint, double output) :
+        input(input),
+        setpoint(setpoint),
+        output(output) 
     {}
 
-    double ping() {
-        input = sensor.ping_cm();
-        return input;
-    }
-
-    int const trigger;
-    int const echo;
     double input;
-    NewPing sensor;
+    double setpoint;
+    double output;
 };
 
-struct pid {
-    pid (double * input, double target, double k_p, double k_i, double k_d, int direction) :
-        output(0),
-        setpoint(target),
-        controller(input, & output, & setpoint, k_p, k_i, k_d, direction) 
-    {
-        controller.SetMode(AUTOMATIC);
-    }
+struct pid_var {
+    pid_var(double kp, double ki, double kd) :
+        kp(kp),
+        ki(ki),
+        kd(kd)
+    {}
 
-    double compute() {
-        controller.Compute();
-        return output;
-    }
+    double kp;
+    double ki;
+    double kd;
+};
 
-    double output;
-    double setpoint;
-    PID controller;
+struct usonic {
+    usonic(Face face, int trigger, int echo, int max = 500) :
+        face(face),
+        handle(trigger, echo, max)
+    {}
+
+    Face face;
+    NewPing handle;
 };
 
 struct servo {
-    servo(int pin, int min, int max) :
+    servo (int pin, int max, int orientation = 1) :
         pin(pin),
-        min(min),
-        max(max)
-    {
-        controller.attach(pin, 1000, 2000);
-    }
-       
+        orientation(orientation),
+        rest_angle(90),
+        max_angle(rest_angle + (orientation * max)),
+        angle(0)
+    {}
+
     int const pin;
-    int const min;
-    int const max;
+    int const orientation;
+    int const rest_angle;
+    int const max_angle;
+    int angle;
     Servo controller;
+
+    void attach() {
+      controller.attach(pin);
+    }
+    
+    void write(int value) {
+        int normal_value = value < max_angle? value : max_angle;
+        angle = rest_angle + (orientation * normal_value);
+        controller.write(angle);
+    }
 };
+
+void error(const __FlashStringHelper*err) {
+  Serial.println(err);
+  while (1);
+}

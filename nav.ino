@@ -22,7 +22,9 @@
 #define MINIMUM_FIRMWARE_VERSION    "0.6.6"
 #define MODE_LED_BEHAVIOUR          "MODE"
 #define BUFSIZE 128   // Size of the read buffer for incoming data
-#define VERBOSE_MODE true 
+#define VERBOSE_MODE true
+#define CALIBRATING 1
+#define PRINT_DEBUG 1
 
 Adafruit_9DOF dof = Adafruit_9DOF();
 Adafruit_LSM303_Mag_Unified mag = Adafruit_LSM303_Mag_Unified(30302);
@@ -63,8 +65,8 @@ std::vector<servo> servos({
     servo(3, 50, -1)
 });
 
-bool is_calibrated = false;
 float offset = 0;
+float phone_heading = 0;  
 
 void setup() {
     Serial.begin(115200);
@@ -134,83 +136,87 @@ void setup() {
         delay(500);
     }
 
+#if CALIBRATING     
     int const calibration_pin = 31;
     Serial.println("Calibrating .... ");
     delay(3000);
     digitalWrite(calibration_pin, HIGH);
  
     float sum = 0;
-    int tries = 1000;
+    int tries = 100;
     int num_values = 0;
     
     for (int i = 0;  i < tries ; i++) {
+        bluetooth_sensor.println("AT+BLEUARTRX");
+        bluetooth_sensor.readline();
         if (!(strcmp(bluetooth_sensor.buffer, "OK") == 0)) {
               // Some data was found, its in the buffer
               String heading_string = bluetooth_sensor.buffer;
               float zero_buffer = heading_string.toFloat();
               if (zero_buffer) {
                   sum += zero_buffer;
+                  num_values++;
               }
          }
      }
 
-     float average = sum / tries;
+     delay(3000);
+     Serial.println("\nCalibrating done");
+     digitalWrite(calibration_pin, LOW);
      
+     float average = sum / num_values;
+     Serial.print("\naverage ");
+     Serial.print(average);
+    
      sensors_event_t mag_event;
      sensors_vec_t orientation;
      
      mag.getEvent(&mag_event);
      if (dof.magGetOrientation(SENSOR_AXIS_Z, &mag_event, &orientation)) {
-         offset = average - orientation.heading; 
-         is_calibrated = true;
+         float corrected_heading = 360 - orientation.heading;
+         offset = average - corrected_heading;
+         Serial.print("\noffset ");
+         Serial.print(offset); 
      } 
-
-     delay(3000);
-     digitalWrite(calibration_pin, LOW);
-     Serial.println("Calibrating done");
-    
+#endif    
 }
-
-float phone_heading = 0;
-float heading_difference = 0;
 
 float deg_to_rad(float deg) { return deg * 3.14 / 180; }
 float rad_to_deg(float rad) { return rad * 180 / 3.14; }
 
 void loop() {
 
-    // OBSTACLE CONTROL
-  /*
-    // filter zeros from input to prevent jerkiness
-    for (auto & sensor : forward_sensors) {
-        double reading = sensor.handle.ping_cm();
-        if (reading) forward_control[sensor.face].input = reading;
-    }
+//    OBSTACLE CONTROL
+//    filter zeros from input to prevent jerkiness
+//    for (auto & sensor : forward_sensors) {
+//        double reading = sensor.handle.ping_cm();
+//        if (reading) forward_control[sensor.face].input = reading;
+//    }
+//
+//    for (auto & pid : forward_pids) pid.Compute();
+//
+//    finds sensor with obstacle within setpoint distance
+//    else uses values from front sensor
+//    auto obstacle_control = std::find_if(forward_control.begin(), forward_control.end(), [&](control_var & control) {
+//        return control.input < control.setpoint;
+//    });
+//
+//    if (obstacle_control == forward_control.end()) *obstacle_control = forward_control[fc];
+//
+//    int left_servo_speed = obstacle_control->output;
+//    int right_servo_speed = obstacle_control->output;
 
-    for (auto & pid : forward_pids) pid.Compute();
-
-    // finds sensor with obstacle within setpoint distance
-    // else uses values from front sensor
-    auto obstacle_control = std::find_if(forward_control.begin(), forward_control.end(), [&](control_var & control) {
-        return control.input < control.setpoint;
-    });
-
-    if (obstacle_control == forward_control.end()) *obstacle_control = forward_control[fc];
-
-    int left_servo_speed = obstacle_control->output;
-    int right_servo_speed = obstacle_control->output;
-*/
     int left_servo_speed = 15;
     int right_servo_speed = 15;
-    // BLUETOOTH HEADING
     
-    // Check for incoming characters from Bluefruit
+//    BLUETOOTH HEADING   
+//    Check for incoming characters from Bluefruit
     bluetooth_sensor.println("AT+BLEUARTRX");
     bluetooth_sensor.readline();
 
     sensors_event_t mag_event;
     sensors_vec_t orientation;
-    
+
     if (!(strcmp(bluetooth_sensor.buffer, "OK") == 0)) {
         // no data
         // Some data was found, its in the buffer
@@ -219,60 +225,58 @@ void loop() {
         float zero_buffer = heading_string.toFloat();
         if (zero_buffer) {
             phone_heading = zero_buffer;
-            
         }
     }
-
-//    if (!is_calibrated) {
-//        offset = average - orientation.heading;
-//        is_calibrated = true;
-//    }
-
+    
+    Serial.print("\nphone_heading ");
+    Serial.print(phone_heading);
+    
     bool boundary_swap = false;
     bool make_turn = false;
-    float tolerance_angle = 15;
+    float heading_difference = 0;
     float abs_heading_difference = 0;
-    
+    float const tolerance_angle = 20;
+
     // IMU HEADING
     mag.getEvent(&mag_event);
     if (dof.magGetOrientation(SENSOR_AXIS_Z, &mag_event, &orientation)) {
-        heading_difference = phone_heading + offset - orientation.heading;  
+        float corrected_heading = 360 - orientation.heading;
+        Serial.print("\norientation_heading ");
+        Serial.print(orientation.heading);  
+        Serial.print("\ncorrected_heading ");
+        Serial.print(corrected_heading);  
         
+        heading_difference = phone_heading - corrected_heading - offset;
+//        heading_difference = corrected_heading - phone_heading - offset;
+//        heading_difference = phone_heading - orientation.heading;
+        Serial.print("\nheading_difference ");
+        Serial.print(heading_difference);
+         
         abs_heading_difference = abs(heading_difference);
+        Serial.print("\nabs_heading_difference ");
+        Serial.print(abs_heading_difference);
         
-        if (abs_heading_difference > (tolerance_angle)) {
+        if (abs_heading_difference > tolerance_angle) {
             make_turn = true;
+            Serial.print("\nmake_turn ");
+            Serial.print(make_turn);
         }
         
         if (abs_heading_difference > 180) {
             abs_heading_difference = 360 - abs_heading_difference;
             boundary_swap = true;
+            Serial.print("\nboundary_swap ");
+            Serial.print(boundary_swap);
         }
         
         heading_control.input = abs_heading_difference;   
     }
     
     heading_pid.Compute();
-    
-    // if phone heading is to the right
-    Serial.print("\nheading_difference ");
-    Serial.print(heading_difference);
-    
-    Serial.print("\nabs_heading_difference ");
-    Serial.print(abs_heading_difference);
-    
-    Serial.print("\noffset ");
-    Serial.print(offset);
-
-    Serial.print("\nboundary_swap ");
-    Serial.print(boundary_swap);
-
-    Serial.print("\nmake_turn ");
-    Serial.print(make_turn);
 
     if (make_turn) {  
         if (!boundary_swap) {
-            if (heading_difference < 0) {
+            if (heading_difference > 0) {
                 right_servo_speed += 10;
             }
             else {    
@@ -280,7 +284,7 @@ void loop() {
             }
         }
         else {
-             if (heading_difference < 0) {
+             if (heading_difference > 0) {
                 left_servo_speed += 10;
             }
             else {    
@@ -288,12 +292,17 @@ void loop() {
             }
         }
     }
-    
+
+    Serial.print("\nleft ");
+    Serial.print(left_servo_speed);
+    Serial.print("\nright ");
+    Serial.println(right_servo_speed);    
+
     servos[fl].write(left_servo_speed); 
     servos[fr].write(right_servo_speed);
 
-    // DEBUG VOMIT
-    
+//    DEBUG VOMIT
+#if PRINT_DEBUG     
 //    Serial.print("\n\ninputs  ");
 //    for (auto & control : forward_control) { Serial.print(control.input); Serial.print(" "); }
 //
@@ -311,20 +320,5 @@ void loop() {
 //    
 //    Serial.print("\nheading_control ");
 //    Serial.print(heading_control.output); 
-//    
-//    Serial.print("\nleft ");
-//    Serial.print(left_servo_speed);      
-//    
-//    Serial.print("\nright ");
-//    Serial.println(right_servo_speed); 
-
-    /* 'orientation' should have valid .heading data now */
-    Serial.print("\nheading ");
-    Serial.print(orientation.heading);
-
-    Serial.print("\nphone_heading ");
-    Serial.print(phone_heading);
-
-    
-   
+ #endif   
 }

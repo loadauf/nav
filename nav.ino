@@ -30,7 +30,7 @@ Adafruit_9DOF dof = Adafruit_9DOF();
 Adafruit_LSM303_Mag_Unified mag = Adafruit_LSM303_Mag_Unified(30302);
 
 //    bluetooth(int txd, int rxd, int cts, int rts, int mode) : 
-Adafruit_BluefruitLE_UART bluetooth_sensor(Serial2, 22);
+Adafruit_BluefruitLE_UART blueto oth_sensor(Serial2, 22);
 
 std::vector<usonic> forward_sensors({
     usonic(fl, 52, 53, 200),
@@ -39,9 +39,9 @@ std::vector<usonic> forward_sensors({
 });
 
 std::vector<control_var> forward_control({
-    control_var(1, 30, 0),
-    control_var(1, 30, 0),
-    control_var(1, 30, 0)
+    control_var(1, 50, 0),
+    control_var(1, 50, 0),
+    control_var(1, 50, 0)
 });
 
 std::vector<pid_var> forward_pid_vars({
@@ -56,8 +56,8 @@ PID forward_pids[] = {
     PID(&forward_control[fc].input, &forward_control[fc].output, &forward_control[fc].setpoint, forward_pid_vars[fc].kp, forward_pid_vars[fc].ki, forward_pid_vars[fc].kd, REVERSE)
 };
 
-control_var heading_control(1, 1, 1);
-pid_var heading_pid_vars(0.1, 0, 0);
+control_var heading_control(1, 0, 1);
+pid_var heading_pid_vars(1, 0, 0);
 PID heading_pid(&heading_control.input, &heading_control.output, &heading_control.setpoint, heading_pid_vars.kp, heading_pid_vars.ki, heading_pid_vars.kd, REVERSE);
 
 std::vector<servo> servos({
@@ -68,18 +68,33 @@ std::vector<servo> servos({
 float offset = 0;
 float phone_heading = 0;  
 
+void wait_for_bluetooth_response(char const * response) {
+   String recieved;  
+   while (recieved != response) {
+        bluetooth_sensor.println("AT+BLEUARTRX");
+        bluetooth_sensor.readline();
+        
+        if ((strcmp(bluetooth_sensor.buffer, "OK") != 0)) {
+            recieved = bluetooth_sensor.buffer;
+        } 
+    }    
+}
+
+bool send_bluetooth_command(char const * command) {
+    bluetooth_sensor.print("AT+BLEUARTTX=");
+    bluetooth_sensor.println(command);
+
+    // check response stastus
+    if (! bluetooth_sensor.waitForOK() ) {
+        return false;
+    }
+
+    return true;
+}
+
 void setup() {
     Serial.begin(115200);
     Serial2.begin(115200);
-
-    pinMode(2, OUTPUT);
-    pinMode(3, OUTPUT);
-    pinMode(44, OUTPUT);
-    pinMode(46, OUTPUT);
-    pinMode(48, OUTPUT);
-    pinMode(50, OUTPUT);
-    pinMode(22, OUTPUT);
-    pinMode(31, OUTPUT);
     
     // setup servos
     servos[fl].attach();
@@ -92,7 +107,7 @@ void setup() {
     }
 
     heading_pid.SetMode(AUTOMATIC);
-    heading_pid.SetOutputLimits(0, 30);
+    heading_pid.SetOutputLimits(0, 15);
     
     // setup magnetometer
     if (!mag.begin()) {
@@ -100,6 +115,7 @@ void setup() {
       Serial.println("Ooops, no LSM303 detected ... Check your wiring!");
       while(1);
     }
+
     /* Initialise the module */
     Serial.print(F("Initialising the Bluefruit LE module: "));
   
@@ -136,96 +152,95 @@ void setup() {
         delay(500);
     }
 
-#if CALIBRATING     
+    Serial.println("Connected");
+
+#if CALIBRATING 
+    delay(1000);
+            
+    send_bluetooth_command("calibrating");
+    wait_for_bluetooth_response("calibrate");
+    Serial.println("\nCalibrating .... ");
+         
     int const calibration_pin = 31;
-    Serial.println("Calibrating .... ");
-    delay(3000);
-    digitalWrite(calibration_pin, HIGH);
- 
     float sum = 0;
+    float maximum = 0;
     int tries = 100;
-    int num_values = 0;
-    
+    int num_values = 1;
+
+    // take maximum reading
     for (int i = 0;  i < tries ; i++) {
         bluetooth_sensor.println("AT+BLEUARTRX");
         bluetooth_sensor.readline();
-        if (!(strcmp(bluetooth_sensor.buffer, "OK") == 0)) {
-              // Some data was found, its in the buffer
-              String heading_string = bluetooth_sensor.buffer;
-              float zero_buffer = heading_string.toFloat();
-              if (zero_buffer) {
-                  sum += zero_buffer;
-                  num_values++;
-              }
-         }
+
+        if ((strcmp(bluetooth_sensor.buffer, "OK") != 0)) {
+            // Some data was found, its in the buffer
+            String heading_string = bluetooth_sensor.buffer;
+            float zero_buffer = heading_string.toFloat();
+    
+            if (zero_buffer > 0 && zero_buffer < 360) {
+                sum += zero_buffer;
+                num_values++;
+            }
+        }
      }
 
-     delay(3000);
-     Serial.println("\nCalibrating done");
-     digitalWrite(calibration_pin, LOW);
-     
      float average = sum / num_values;
-     Serial.print("\naverage ");
-     Serial.print(average);
-    
+
      sensors_event_t mag_event;
      sensors_vec_t orientation;
-     
+
      mag.getEvent(&mag_event);
      if (dof.magGetOrientation(SENSOR_AXIS_Z, &mag_event, &orientation)) {
          float corrected_heading = 360 - orientation.heading;
          offset = average - corrected_heading;
+
          Serial.print("\noffset ");
          Serial.print(offset); 
      } 
-#endif    
+
+     send_bluetooth_command("done");
+     Serial.println("\nCalibrating done");
+     
+     Serial.print("\naverage ");
+     Serial.print(average);
+
+     Serial.print("\nsum ");
+     Serial.print(sum);
+
+     Serial.print("\nvalues ");
+     Serial.print(num_values);
+    
+     delay(1000);
+#endif
+     wait_for_bluetooth_response("start");
+     Serial.println("Starting ...");
 }
 
-float deg_to_rad(float deg) { return deg * 3.14 / 180; }
-float rad_to_deg(float rad) { return rad * 180 / 3.14; }
-
+bool stopped = false;
 void loop() {
-
-//    OBSTACLE CONTROL
-//    filter zeros from input to prevent jerkiness
-//    for (auto & sensor : forward_sensors) {
-//        double reading = sensor.handle.ping_cm();
-//        if (reading) forward_control[sensor.face].input = reading;
-//    }
-//
-//    for (auto & pid : forward_pids) pid.Compute();
-//
-//    finds sensor with obstacle within setpoint distance
-//    else uses values from front sensor
-//    auto obstacle_control = std::find_if(forward_control.begin(), forward_control.end(), [&](control_var & control) {
-//        return control.input < control.setpoint;
-//    });
-//
-//    if (obstacle_control == forward_control.end()) *obstacle_control = forward_control[fc];
-//
-//    int left_servo_speed = obstacle_control->output;
-//    int right_servo_speed = obstacle_control->output;
-
-    int left_servo_speed = 15;
-    int right_servo_speed = 15;
     
 //    BLUETOOTH HEADING   
 //    Check for incoming characters from Bluefruit
     bluetooth_sensor.println("AT+BLEUARTRX");
     bluetooth_sensor.readline();
 
-    sensors_event_t mag_event;
-    sensors_vec_t orientation;
-
-    if (!(strcmp(bluetooth_sensor.buffer, "OK") == 0)) {
-        // no data
+    if ((strcmp(bluetooth_sensor.buffer, "OK") != 0)) {
         // Some data was found, its in the buffer
         String heading_string = bluetooth_sensor.buffer;
-
+        Serial.print("\nbuffer ");
+        Serial.print(bluetooth_sensor.buffer);
+        if (heading_string == "stop") {
+            stopped = true;
+        }
+        else if (heading_string == "start") {
+            stopped = false;
+        }
+        
         float zero_buffer = heading_string.toFloat();
         if (zero_buffer) {
             phone_heading = zero_buffer;
         }
+    
     }
     
     Serial.print("\nphone_heading ");
@@ -237,18 +252,21 @@ void loop() {
     float abs_heading_difference = 0;
     float const tolerance_angle = 20;
 
+    sensors_event_t mag_event;
+    sensors_vec_t orientation;
+    
     // IMU HEADING
     mag.getEvent(&mag_event);
     if (dof.magGetOrientation(SENSOR_AXIS_Z, &mag_event, &orientation)) {
         float corrected_heading = 360 - orientation.heading;
+
         Serial.print("\norientation_heading ");
         Serial.print(orientation.heading);  
+
         Serial.print("\ncorrected_heading ");
         Serial.print(corrected_heading);  
         
-        heading_difference = phone_heading - corrected_heading - offset;
-//        heading_difference = corrected_heading - phone_heading - offset;
-//        heading_difference = phone_heading - orientation.heading;
+        heading_difference = phone_heading - corrected_heading - offset; 
         Serial.print("\nheading_difference ");
         Serial.print(heading_difference);
          
@@ -271,54 +289,98 @@ void loop() {
         
         heading_control.input = abs_heading_difference;   
     }
-    
-    heading_pid.Compute();
 
-    if (make_turn) {  
-        if (!boundary_swap) {
-            if (heading_difference > 0) {
-                right_servo_speed += 10;
-            }
-            else {    
-                left_servo_speed += 10;
-            }
-        }
-        else {
-             if (heading_difference > 0) {
-                left_servo_speed += 10;
-            }
-            else {    
-                right_servo_speed += 10;
-            }
-        }
+//    OBSTACLE CONTROL
+//    filter zeros from input to prevent jerkiness
+    for (auto & sensor : forward_sensors) {
+        double reading = sensor.handle.ping_cm();
+        if (reading) 
+            forward_control[sensor.face].input = reading;
     }
 
-    Serial.print("\nleft ");
-    Serial.print(left_servo_speed);
-    Serial.print("\nright ");
-    Serial.println(right_servo_speed);    
+    for (auto & pid : forward_pids) 
+        pid.Compute();
+
+//    finds sensor with obstacle within setpoint distance
+//    else uses values from front sensor
+
+    bool obstacle_found = false;
+    auto obstacle_control = std::find_if(forward_control.begin(), forward_control.end(), [&](control_var & control) {
+        obstacle_found = control.input < control.setpoint;
+        return obstacle_found;
+    });
+
+    if (obstacle_control == forward_control.end()) 
+        *obstacle_control = forward_control[fl];
+
+    heading_pid.Compute();
+    
+    int left_servo_speed = 0; 
+    int right_servo_speed = 0;
+
+    if (!bluetooth_sensor.isConnected()) {
+//stopped = true;
+    }
+
+    Serial.print("\nstopped ");
+    Serial.print(stopped);
+    
+    if (!stopped) {
+        left_servo_speed = 15;
+        right_servo_speed = 15;
+        if (make_turn) {  
+            if (!boundary_swap) {
+                if (heading_difference > 0) {
+                    right_servo_speed += 10;
+                }
+                else {    
+                    left_servo_speed += 10;
+                }
+            }
+            else {
+                 if (heading_difference > 0) {
+                    left_servo_speed += 10;
+                }
+                else {    
+                    right_servo_speed += 10;
+                }
+            }
+        }
+
+        if (obstacle_found) {
+            left_servo_speed = obstacle_control->output;
+            right_servo_speed = obstacle_control->output;
+        }
+    }
 
     servos[fl].write(left_servo_speed); 
     servos[fr].write(right_servo_speed);
 
 //    DEBUG VOMIT
 #if PRINT_DEBUG     
-//    Serial.print("\n\ninputs  ");
-//    for (auto & control : forward_control) { Serial.print(control.input); Serial.print(" "); }
-//
-//    Serial.print("\noutputs  ");
-//    for (auto & control : forward_control) { Serial.print(control.output); Serial.print(" "); }
-//
-//    Serial.print("\nangles  ");
-//    for (auto & servo : servos) { Serial.print(servo.angle); Serial.print(" "); }
-//
-//    Serial.print("\nobstacle_control ");
-//    Serial.print(obstacle_control->output); 
-//
-//    Serial.print("\nheading_input ");
-//    Serial.print(heading_control.input);
-//    
-//    Serial.print("\nheading_control ");
-//    Serial.print(heading_control.output); 
+    Serial.print("\nleft ");
+    Serial.print(left_servo_speed);
+
+    Serial.print("\nright ");
+    Serial.println(right_servo_speed);    
+
+    Serial.print("\n\ninputs  ");
+    for (auto & control : forward_control) { Serial.print(control.input); Serial.print(" "); }
+
+    Serial.print("\noutputs  ");
+    for (auto & control : forward_control) { Serial.print(control.output); Serial.print(" "); }
+
+    Serial.print("\nangles  ");
+    for (auto & servo : servos) { Serial.print(servo.angle); Serial.print(" "); }
+
+    Serial.print("\nobstacle_control ");
+    Serial.print(obstacle_control->output); 
+
+    Serial.print("\nheading_input ");
+    Serial.print(heading_control.input);
+    
+    Serial.print("\nheading_control ");
+    Serial.print(heading_control.output); 
  #endif   
+
 }
